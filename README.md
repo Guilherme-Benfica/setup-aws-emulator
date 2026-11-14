@@ -37,6 +37,16 @@ The AWS provider reads the same environment variables as the CLI and SDKs, so an
 
 A full example that creates an S3 bucket, an object and a DynamoDB table lives in [`examples/terraform`](examples/terraform). This repository's CI runs it on every push: `apply`, a clean `plan`, then `destroy`.
 
+> [!IMPORTANT]
+> **Pin the AWS provider below 6.23.0 for `aws_s3_bucket`.** From 6.23.0 the provider reads and writes bucket tags through Amazon S3 Control, and the SDK always sends S3 Control requests to `<account-id>.127.0.0.1`, a host that doesn't exist. AWS Emulator [documents this limitation](https://docs.aws.amazon.com/emulator/latest/userguide/point-sdk-to-emulator.html#point-sdk-host-names). The apply fails with `lookup 000000000000.127.0.0.1: no such host`. Until that changes, use:
+>
+> ```hcl
+> aws = {
+>   source  = "hashicorp/aws"
+>   version = ">= 5.0, < 6.23.0"
+> }
+> ```
+
 ## Inputs
 
 | Input | Default | Description |
