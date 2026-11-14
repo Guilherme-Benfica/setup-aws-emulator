@@ -2,6 +2,9 @@
 # Starts AWS Emulator in the background and waits for its health check.
 set -euo pipefail
 
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 port="${EMULATOR_PORT:-9297}"
 telemetry="${EMULATOR_TELEMETRY:-off}"
 timeout="${EMULATOR_WAIT_TIMEOUT:-60}"
@@ -25,12 +28,13 @@ case "${telemetry}" in
     ;;
 esac
 
-emulator_dir="${HOME}/.aws/emulator/${port}"
+home="$(emulator_home)"
+emulator_dir="${home}/.aws/emulator/${port}"
 ca_bundle="${emulator_dir}/ca.pem"
 health_url="https://127.0.0.1:${port}/__admin/health"
 log_file="${RUNNER_TEMP:-/tmp}/aws-emulator-${port}.log"
 
-nohup aws-emulator "${args[@]}" >"${log_file}" 2>&1 &
+HOME="${home}" nohup aws-emulator "${args[@]}" >"${log_file}" 2>&1 &
 pid=$!
 
 ready=0
@@ -57,6 +61,6 @@ echo "AWS Emulator is healthy at https://127.0.0.1:${port} (pid ${pid})"
 
 {
   echo "endpoint=https://127.0.0.1:${port}"
-  echo "ca-bundle=${ca_bundle}"
-  echo "log-file=${log_file}"
+  echo "ca-bundle=$(runner_path "${ca_bundle}")"
+  echo "log-file=$(runner_path "${log_file}")"
 } >>"${GITHUB_OUTPUT}"

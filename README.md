@@ -47,10 +47,25 @@ A full example that creates an S3 bucket, an object and a DynamoDB table lives i
 > }
 > ```
 
+## Windows
+
+The same step works on `windows-2022` and `windows-2025`:
+
+```yaml
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Guilherme-Benfica/setup-aws-emulator@v1
+      - run: aws s3 mb s3://my-bucket   # PowerShell, cmd or Git Bash
+```
+
+AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows runners only runs Windows containers. So on Windows the action installs Ubuntu in WSL 1 with [`Vampire/setup-wsl`](https://github.com/Vampire/setup-wsl) and runs the emulator there. WSL 1 shares the network with Windows, so the emulator is at `https://127.0.0.1:9297` for every Windows program, and the action exports Windows paths (`C:\Users\...\.aws\emulator\9297\...`) in the same variables as on Linux. Setting up WSL adds about two minutes to the job.
+
 ## Inputs
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `version` | `latest` | Emulator version to install: `latest`, or a version such as `1.0.351` from [`versions.json`](https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS/versions.json) (`1.0.351.1` works too). Pin it when you want the same emulator on every run. |
 | `port` | `9297` | Port the emulator listens on, bound to 127.0.0.1 only. |
 | `region` | `us-east-1` | Exported to `AWS_REGION` and `AWS_DEFAULT_REGION`. |
 | `telemetry` | `off` | Emulator telemetry, `on` or `off`. |
@@ -60,6 +75,7 @@ A full example that creates an S3 bucket, an object and a DynamoDB table lives i
 
 | Output | Example |
 | --- | --- |
+| `version` | Version printed by `aws-emulator -v` |
 | `endpoint` | `https://127.0.0.1:9297` |
 | `ca-bundle` | Path to the emulator's `ca.pem` |
 | `account-id` | `000000000000` |
@@ -81,11 +97,17 @@ Before handing over, the action calls `sts get-caller-identity` and fails unless
 
 ## Good to know
 
-- **Linux runners only** (x64 and arm64). On macOS and Windows, AWS Emulator runs through Docker.
+- **Runs on Linux (x64, arm64) and Windows (x64) runners.** macOS runners aren't supported, because GitHub-hosted macOS runners have no Docker. On a self-hosted macOS runner, use the [Docker setup](https://docs.aws.amazon.com/emulator/latest/userguide/getting-started-docker.html).
 - **Do not combine it with real credentials in the same job.** If `AWS_ACCESS_KEY_ID` or `AWS_PROFILE` is set, the action warns you, because those win over the emulator's credentials file.
 - **IAM is not enforced.** AWS Emulator does not evaluate IAM policies the way AWS does, so test permissions on real AWS.
 - **State is in memory** and disappears with the runner, so every job starts clean.
 - Fidelity varies by service and operation, and unsupported operations return HTTP 501. See the [AWS Emulator User Guide](https://docs.aws.amazon.com/emulator/latest/userguide/what-is-service.html).
+
+## Versioning
+
+Releases follow `vMAJOR.MINOR.PATCH`. The major tag (`v1`) always points at the latest `v1.x.y`, so `@v1` picks up fixes without breaking changes. Pin a full version (`@v1.0.0`) or a commit SHA if you want nothing to move.
+
+To release, either publish a release such as `v1.2.3` in the GitHub UI, or run the [`release`](.github/workflows/release.yml) workflow by hand with that version. Both move the major tag to the new release.
 
 ## Learn more
 

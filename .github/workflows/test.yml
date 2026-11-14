@@ -9,13 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck -x scripts/*.sh
+
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
   cli:
     name: CLI (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, windows-2025]
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash # Git Bash on Windows
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +45,7 @@ jobs:
           test "${{ steps.emulator.outputs.account-id }}" = "000000000000"
           test "${{ steps.emulator.outputs.endpoint }}" = "https://127.0.0.1:9297"
           test -f "${{ steps.emulator.outputs.ca-bundle }}"
+          test -n "${{ steps.emulator.outputs.version }}"
 
       - name: Use S3 and DynamoDB from the CLI
         run: |
@@ -44,15 +62,27 @@ jobs:
           aws dynamodb put-item --table-name action-smoke-test --item '{"id": {"S": "1"}}'
           aws dynamodb get-item --table-name action-smoke-test --key '{"id": {"S": "1"}}' | grep '"1"'
 
+      - name: Use the emulator from PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          aws sts get-caller-identity
+          aws s3 ls | Select-String action-smoke-test
+
       - name: Show the emulator log if something fails
         if: failure()
         run: cat "${{ steps.emulator.outputs.log-file }}"
 
   terraform:
-    name: Terraform
-    runs-on: ubuntu-24.04
+    name: Terraform (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
+        shell: bash
         working-directory: examples/terraform
     steps:
       - uses: actions/checkout@v4
@@ -85,8 +115,8 @@ jobs:
         if: failure()
         run: cat "${{ steps.emulator.outputs.log-file }}"
 
-  custom-port:
-    name: Custom port and Region
+  custom-inputs:
+    name: Custom version, port and Region
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -95,11 +125,16 @@ jobs:
         id: emulator
         uses: ./
         with:
+          version: 1.0.351.1
           port: "9400"
           region: eu-west-1
 
-      - name: Check the endpoint and Region
+      - name: Check the version, endpoint and Region
+        env:
+          INSTALLED: ${{ steps.emulator.outputs.version }}
         run: |
+          echo "Installed ${INSTALLED}"
+          [[ "${INSTALLED}" == 1.0.351* ]]
           test "$AWS_ENDPOINT_URL" = "https://127.0.0.1:9400"
           test "$AWS_REGION" = "eu-west-1"
           aws s3 mb s3://custom-port-test

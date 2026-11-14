@@ -1,5 +1,5 @@
 name: Setup AWS Emulator
-description: Install and start AWS Emulator, then point the AWS CLI, SDKs and Terraform at it. No AWS account, no secrets, no cost.
+description: Install and start AWS Emulator on Linux or Windows, then point the AWS CLI, SDKs and Terraform at it. No AWS account, no secrets, no cost.
 author: Guilherme Benfica
 
 branding:
@@ -7,6 +7,10 @@ branding:
   color: orange
 
 inputs:
+  version:
+    description: AWS Emulator version to install, "latest" or a version listed in versions.json.
+    required: false
+    default: latest
   port:
     description: Port the emulator listens on (127.0.0.1 only).
     required: false
@@ -25,28 +29,44 @@ inputs:
     default: "60"
 
 outputs:
+  version:
+    description: Version reported by aws-emulator -v.
+    value: ${{ steps.install.outputs.version || steps.install-wsl.outputs.version }}
   endpoint:
     description: The emulator endpoint, for example https://127.0.0.1:9297
-    value: ${{ steps.start.outputs.endpoint }}
+    value: ${{ steps.start.outputs.endpoint || steps.start-wsl.outputs.endpoint }}
   ca-bundle:
     description: Path to the emulator's CA certificate (ca.pem).
-    value: ${{ steps.start.outputs.ca-bundle }}
+    value: ${{ steps.start.outputs.ca-bundle || steps.start-wsl.outputs.ca-bundle }}
   account-id:
     description: Account ID reported by the emulator (000000000000).
     value: ${{ steps.verify.outputs.account-id }}
   log-file:
     description: Path to the emulator log file.
-    value: ${{ steps.start.outputs.log-file }}
+    value: ${{ steps.start.outputs.log-file || steps.start-wsl.outputs.log-file }}
 
 runs:
   using: composite
   steps:
-    - name: Install AWS Emulator
+    - name: Check the runner
+      if: ${{ !(runner.os == 'Linux' || (runner.os == 'Windows' && runner.arch == 'X64')) }}
       shell: bash
+      run: |
+        echo "::error::setup-aws-emulator runs on Linux (x64, arm64) and Windows (x64) runners, not on ${RUNNER_OS} ${RUNNER_ARCH}. On macOS, run AWS Emulator in Docker on a self-hosted runner."
+        exit 1
+
+    # Linux: the emulator runs natively.
+    - name: Install AWS Emulator
+      id: install
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        EMULATOR_VERSION: ${{ inputs.version }}
       run: bash "$GITHUB_ACTION_PATH/scripts/install.sh"
 
     - name: Start AWS Emulator
       id: start
+      if: runner.os == 'Linux'
       shell: bash
       env:
         EMULATOR_PORT: ${{ inputs.port }}
@@ -55,12 +75,54 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/start.sh"
 
     - name: Point AWS CLI, SDKs and Terraform at the emulator
+      if: runner.os == 'Linux'
       shell: bash
       env:
         EMULATOR_PORT: ${{ inputs.port }}
         EMULATOR_REGION: ${{ inputs.region }}
       run: bash "$GITHUB_ACTION_PATH/scripts/export-env.sh"
 
+    # Windows: the emulator is a Linux program, so it runs in WSL 1. WSL 1 shares
+    # the network with Windows, so 127.0.0.1:<port> works from both sides. Docker
+    # on GitHub-hosted Windows runners only runs Windows containers.
+    - name: Set up WSL
+      if: runner.os == 'Windows'
+      uses: Vampire/setup-wsl@e707f0b61a07f8ea48a64d83edfcbd4a7af45926 # v7.2.0
+      with:
+        distribution: Ubuntu-24.04
+        wsl-version: 1
+        additional-packages: curl ca-certificates
+
+    - name: Install AWS Emulator in WSL
+      id: install-wsl
+      if: runner.os == 'Windows'
+      shell: wsl-bash {0}
+      env:
+        EMULATOR_VERSION: ${{ inputs.version }}
+        WSLENV: EMULATOR_VERSION:GITHUB_OUTPUT/p:GITHUB_ACTION_PATH/p
+      run: bash "$GITHUB_ACTION_PATH/scripts/install.sh"
+
+    - name: Start AWS Emulator in WSL
+      id: start-wsl
+      if: runner.os == 'Windows'
+      shell: wsl-bash {0}
+      env:
+        EMULATOR_PORT: ${{ inputs.port }}
+        EMULATOR_TELEMETRY: ${{ inputs.telemetry }}
+        EMULATOR_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        WSLENV: EMULATOR_PORT:EMULATOR_TELEMETRY:EMULATOR_WAIT_TIMEOUT:USERPROFILE/p:RUNNER_TEMP/p:GITHUB_OUTPUT/p:GITHUB_ACTION_PATH/p
+      run: bash "$GITHUB_ACTION_PATH/scripts/start.sh"
+
+    - name: Point AWS CLI, SDKs and Terraform at the emulator
+      if: runner.os == 'Windows'
+      shell: wsl-bash {0}
+      env:
+        EMULATOR_PORT: ${{ inputs.port }}
+        EMULATOR_REGION: ${{ inputs.region }}
+        WSLENV: EMULATOR_PORT:EMULATOR_REGION:USERPROFILE/p:GITHUB_ENV/p:GITHUB_ACTION_PATH/p
+      run: bash "$GITHUB_ACTION_PATH/scripts/export-env.sh"
+
+    # Both: runs in the runner's own bash (Git Bash on Windows), with its own AWS CLI.
     - name: Verify the emulator answers
       id: verify
       shell: bash
