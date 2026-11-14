@@ -3,6 +3,9 @@
 # or inside WSL on a Windows runner.
 set -euo pipefail
 
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 case "$(uname -m)" in
   x86_64) deb_arch="amd64" ;;
   aarch64) deb_arch="arm64" ;;
@@ -33,7 +36,7 @@ fi
 if command -v aws-emulator >/dev/null 2>&1; then
   installed="$(aws-emulator -v | sed -n 's/^Version: //p')"
   echo "AWS Emulator ${installed} is already installed"
-  echo "version=${installed}" >>"${GITHUB_OUTPUT}"
+  set_output version "${installed}"
   exit 0
 fi
 tmp_dir="$(mktemp -d)"
@@ -47,4 +50,4 @@ fi
 
 installed="$(aws-emulator -v | sed -n 's/^Version: //p')"
 echo "Installed AWS Emulator ${installed}"
-echo "version=${installed}" >>"${GITHUB_OUTPUT}"
+set_output version "${installed}"

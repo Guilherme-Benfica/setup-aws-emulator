@@ -1,0 +1,17 @@
+# An app in a container that reaches AWS Emulator on the host. With network_mode: host
+# (Linux), 127.0.0.1:9297 inside the container is the emulator, so its certificate stays
+# valid. Run after setup-aws-emulator with:
+#   EMULATOR_DIR="$(dirname "$AWS_CA_BUNDLE")" docker compose -f examples/compose/compose.yml run --rm aws
+services:
+  aws:
+    image: amazon/aws-cli
+    network_mode: host
+    environment:
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL}
+      AWS_REGION: ${AWS_REGION}
+      AWS_CA_BUNDLE: /emulator/ca.pem
+      AWS_SHARED_CREDENTIALS_FILE: /emulator/emulator_credentials
+      AWS_EC2_METADATA_DISABLED: "true"
+    volumes:
+      - ${EMULATOR_DIR}:/emulator:ro
+    command: ["sts", "get-caller-identity"]

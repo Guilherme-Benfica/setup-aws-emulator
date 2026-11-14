@@ -23,6 +23,14 @@ inputs:
     description: Emulator telemetry, "on" or "off".
     required: false
     default: "off"
+  java-tool-options:
+    description: Also export JAVA_TOOL_OPTIONS so every JVM trusts the emulator. Off by default; AWS_EMULATOR_JAVA_OPTS is always exported for your test JVM.
+    required: false
+    default: "false"
+  init:
+    description: Scripts (.sh) or Terraform directories to run after the emulator starts, one per line, in order.
+    required: false
+    default: ""
   wait-timeout:
     description: Seconds to wait for the health check before failing.
     required: false
@@ -41,6 +49,12 @@ outputs:
   account-id:
     description: Account ID reported by the emulator (000000000000).
     value: ${{ steps.verify.outputs.account-id }}
+  ca-bundle-combined:
+    description: System CA certificates plus the emulator CA, exported as SSL_CERT_FILE (Linux).
+    value: ${{ steps.certs.outputs.ca-bundle-combined }}
+  java-truststore:
+    description: PKCS12 trust store with the JDK roots plus the emulator CA (password changeit).
+    value: ${{ steps.certs.outputs.java-truststore }}
   log-file:
     description: Path to the emulator log file.
     value: ${{ steps.start.outputs.log-file || steps.start-wsl.outputs.log-file }}
@@ -80,7 +94,7 @@ runs:
       env:
         EMULATOR_PORT: ${{ inputs.port }}
         EMULATOR_REGION: ${{ inputs.region }}
-      run: bash "$GITHUB_ACTION_PATH/scripts/export-env.sh"
+      run: bash "$GITHUB_ACTION_PATH/scripts/env.sh" >>"$GITHUB_ENV"
 
     # Windows: the emulator is a Linux program, so it runs in WSL 1. WSL 1 shares
     # the network with Windows, so 127.0.0.1:<port> works from both sides. Docker
@@ -120,10 +134,28 @@ runs:
         EMULATOR_PORT: ${{ inputs.port }}
         EMULATOR_REGION: ${{ inputs.region }}
         WSLENV: EMULATOR_PORT:EMULATOR_REGION:USERPROFILE/p:GITHUB_ENV/p:GITHUB_ACTION_PATH/p
-      run: bash "$GITHUB_ACTION_PATH/scripts/export-env.sh"
+      run: bash "$GITHUB_ACTION_PATH/scripts/env.sh" >>"$GITHUB_ENV"
 
-    # Both: runs in the runner's own bash (Git Bash on Windows), with its own AWS CLI.
+    # Both: the rest runs in the runner's own bash (Git Bash on Windows).
+    - name: Trust the emulator certificate in Node, .NET and Java
+      id: certs
+      shell: bash
+      env:
+        EMULATOR_PORT: ${{ inputs.port }}
+        JAVA_TOOL_OPTIONS_ENABLED: ${{ inputs.java-tool-options }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/certs.sh" >>"$GITHUB_ENV"
+
     - name: Verify the emulator answers
       id: verify
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/scripts/verify.sh"
+
+    - name: Run init
+      if: inputs.init != ''
+      shell: bash
+      env:
+        INIT: ${{ inputs.init }}
+        EMULATOR_LOG: ${{ steps.start.outputs.log-file || steps.start-wsl.outputs.log-file }}
+      run: |
+        mapfile -t paths <<<"$INIT"
+        bash "$GITHUB_ACTION_PATH/scripts/init.sh" "${paths[@]}"

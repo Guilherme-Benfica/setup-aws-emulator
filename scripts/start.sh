@@ -32,14 +32,32 @@ home="$(emulator_home)"
 emulator_dir="${home}/.aws/emulator/${port}"
 ca_bundle="${emulator_dir}/ca.pem"
 health_url="https://127.0.0.1:${port}/__admin/health"
-log_file="${RUNNER_TEMP:-/tmp}/aws-emulator-${port}.log"
+state_dir="$(work_dir "${port}")"
+log_file="${state_dir}/emulator.log"
+
+healthy() {
+  [[ -f "${ca_bundle}" ]] && curl -sf --cacert "${ca_bundle}" "${health_url}" >/dev/null
+}
+
+publish_outputs() {
+  set_output endpoint "https://127.0.0.1:${port}"
+  set_output ca-bundle "$(runner_path "${ca_bundle}")"
+  set_output log-file "$(runner_path "${log_file}")"
+}
+
+if healthy; then
+  echo "AWS Emulator is already running at https://127.0.0.1:${port}"
+  publish_outputs
+  exit 0
+fi
 
 HOME="${home}" nohup aws-emulator "${args[@]}" >"${log_file}" 2>&1 &
 pid=$!
+echo "${pid}" >"${state_dir}/pid"
 
 ready=0
 for ((i = 0; i < timeout; i++)); do
-  if [[ -f "${ca_bundle}" ]] && curl -sf --cacert "${ca_bundle}" "${health_url}" >/dev/null; then
+  if healthy; then
     ready=1
     break
   fi
@@ -59,8 +77,4 @@ fi
 
 echo "AWS Emulator is healthy at https://127.0.0.1:${port} (pid ${pid})"
 
-{
-  echo "endpoint=https://127.0.0.1:${port}"
-  echo "ca-bundle=$(runner_path "${ca_bundle}")"
-  echo "log-file=$(runner_path "${log_file}")"
-} >>"${GITHUB_OUTPUT}"
+publish_outputs

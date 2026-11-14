@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: shellcheck
-        run: shellcheck -x scripts/*.sh
+        run: shellcheck -x scripts/*.sh bin/awsemu install.sh tests/init/*.sh tests/awsemu/*.sh
 
       - name: actionlint
         run: |
@@ -139,3 +139,212 @@ jobs:
           test "$AWS_REGION" = "eu-west-1"
           aws s3 mb s3://custom-port-test
           aws s3 ls | grep custom-port-test
+
+  sdks:
+    name: SDK ${{ matrix.sdk }} (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2025]
+        sdk: [python, go, node, dotnet, java]
+        exclude:
+          - runner: windows-2025
+            sdk: java
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start AWS Emulator
+        id: emulator
+        uses: ./
+        with:
+          java-tool-options: ${{ matrix.sdk == 'java' }}
+
+      # Toolchains and dependencies are installed after the action on purpose: downloads
+      # must keep working with the certificate variables it exports.
+      - if: matrix.sdk == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: matrix.sdk == 'python'
+        run: |
+          pip install boto3
+          python tests/sdk/python/check.py
+
+      - if: matrix.sdk == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - if: matrix.sdk == 'go'
+        working-directory: tests/sdk/go
+        run: |
+          go get github.com/aws/aws-sdk-go-v2/config github.com/aws/aws-sdk-go-v2/service/sts
+          go run .
+
+      - if: matrix.sdk == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: matrix.sdk == 'node'
+        working-directory: tests/sdk/node
+        run: |
+          npm install --no-audit --no-fund
+          node check.mjs
+
+      - if: matrix.sdk == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - if: matrix.sdk == 'dotnet'
+        run: dotnet run --project tests/sdk/dotnet
+
+      - if: matrix.sdk == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - if: matrix.sdk == 'java'
+        working-directory: tests/sdk/java
+        run: |
+          mvn -B -q package dependency:copy-dependencies -DincludeScope=runtime
+          java -cp "target/classes:target/dependency/*" Check
+
+      - name: Show the emulator log if something fails
+        if: failure()
+        run: cat "${{ steps.emulator.outputs.log-file }}"
+
+  init:
+    name: init
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Start AWS Emulator with init
+        uses: ./
+        with:
+          init: |
+            tests/init/create.sh
+            examples/terraform
+
+      - name: The init resources exist
+        run: |
+          aws s3 ls | grep init-bucket
+          aws kinesis describe-stream-summary --stream-name init-stream
+          aws dynamodb describe-table --table-name tf-emulator-demo-notes --query Table.TableStatus
+
+  init-fails:
+    name: init that fails
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start AWS Emulator with a failing init
+        id: emulator
+        continue-on-error: true
+        uses: ./
+        with:
+          init: tests/init/fail.sh
+
+      - name: The action failed
+        env:
+          OUTCOME: ${{ steps.emulator.outcome }}
+        run: test "${OUTCOME}" = "failure"
+
+  awsemu-linux:
+    name: awsemu (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/awsemu/linux.sh
+
+  awsemu-windows:
+    name: awsemu (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Vampire/setup-wsl@e707f0b61a07f8ea48a64d83edfcbd4a7af45926 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 1
+          additional-packages: curl ca-certificates
+      - shell: pwsh
+        run: ./tests/awsemu/windows.ps1
+      - if: always()
+        shell: pwsh
+        run: ./tests/awsemu/windows-gitbash.ps1
+      - if: always()
+        shell: pwsh
+        run: ./tests/awsemu/windows-non-ascii.ps1
+
+  compose:
+    name: Docker Compose
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start AWS Emulator
+        uses: ./
+
+      - name: A container reaches the emulator
+        run: |
+          EMULATOR_DIR="$(dirname "$AWS_CA_BUNDLE")" \
+            docker compose -f examples/compose/compose.yml run --rm aws | grep 000000000000
+
+  report:
+    name: Report
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start AWS Emulator
+        uses: ./
+
+      - name: Call an operation the emulator does not implement, and one it refuses
+        run: |
+          aws gamelift list-fleets || true
+          aws kinesis create-stream --stream-name report-test --shard-count 1
+          aws kinesis wait stream-exists --stream-name report-test
+          aws kinesis increase-stream-retention-period --stream-name report-test --retention-period-hours 24 || true
+
+      - name: The summary explains NotImplemented, lists refused operations and points at the log
+        run: |
+          bash scripts/report.sh 9297 | tee report.txt
+          grep -q "NotImplemented" report.txt
+          grep -q "emulator.log" report.txt
+          grep -q "IncreaseStreamRetentionPeriod" report.txt
+
+      - uses: ./report
+        if: always()
+
+  demo:
+    name: Demo project
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Start AWS Emulator and create the demo pipeline
+        uses: ./
+        with:
+          init: examples/demo/infra
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the demo tests
+        working-directory: examples/demo
+        run: |
+          pip install boto3 pytest
+          python -m pytest -q

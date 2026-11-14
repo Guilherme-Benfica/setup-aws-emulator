@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# awsemu: run AWS Emulator on this machine and point your shell at it.
+set -euo pipefail
+
+app_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+scripts="${app_dir}/scripts"
+
+# Git Bash on Windows: the emulator runs in WSL, so hand off to the Windows awsemu.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    args=("$@")
+    if [[ "${1:-}" == env && " $* " != *" --shell "* ]]; then
+      args+=(--shell bash)
+    fi
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "${app_dir}/windows/awsemu.ps1")" "${args[@]}"
+    ;;
+esac
+# shellcheck source-path=SCRIPTDIR source=../scripts/lib.sh
+source "${scripts}/lib.sh"
+
+credential_vars=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
+  AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+  AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN)
+
+usage() {
+  cat <<'USAGE'
+Usage: awsemu <command> [options]
+
+Commands:
+  up       Install AWS Emulator if needed, start it and run init steps
+  env      Print the variables that point the AWS CLI and SDKs at it
+           bash/zsh:   eval "$(awsemu env)"
+           PowerShell: awsemu env --shell pwsh | Out-String | Invoke-Expression
+  status   Show whether it is running
+  logs     Show its log (-f to follow)
+  down     Stop it and delete its files
+
+Options:
+  --port N          Port (default 9297)
+  --region R        Region for the SDKs (default us-east-1, up only)
+  --init PATH       .sh file or Terraform directory to run after up (repeatable)
+  --telemetry on    Turn emulator telemetry on (default off)
+  --shell bash|pwsh Output format for env (default bash)
+USAGE
+}
+
+command="${1:-}"
+[[ -n "${command}" ]] && shift
+port=9297 region=us-east-1 telemetry=off shell_kind=bash follow=0
+inits=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --port) port="$2"; shift 2 ;;
+    --region) region="$2"; shift 2 ;;
+    --init) inits+=("$2"); shift 2 ;;
+    --telemetry) telemetry="$2"; shift 2 ;;
+    --shell) shell_kind="$2"; shift 2 ;;
+    -f) follow=1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) echo "awsemu: unknown option $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+emulator_dir="$(emulator_home)/.aws/emulator/${port}"
+
+healthy() {
+  [[ -f "${emulator_dir}/ca.pem" ]] &&
+    curl -sf --cacert "${emulator_dir}/ca.pem" "https://127.0.0.1:${port}/__admin/health" >/dev/null
+}
+
+# Runs a command with the emulator variables set and real credentials removed.
+with_env() {
+  (
+    unset "${credential_vars[@]}"
+    while IFS='=' read -r key value; do
+      export "${key}=${value}"
+    done <"${state}/env"
+    "$@"
+  )
+}
+
+state="$(work_dir "${port}")"
+
+case "${command}" in
+  up)
+    bash "${scripts}/install.sh"
+    EMULATOR_PORT="${port}" EMULATOR_TELEMETRY="${telemetry}" bash "${scripts}/start.sh"
+    EMULATOR_PORT="${port}" EMULATOR_REGION="${region}" bash "${scripts}/env.sh" >"${state}/env"
+    EMULATOR_PORT="${port}" EMULATOR_CA="${emulator_dir}/ca.pem" bash "${scripts}/certs.sh" >>"${state}/env"
+    if [[ ${#inits[@]} -gt 0 ]]; then
+      with_env env EMULATOR_LOG="${state}/emulator.log" bash "${scripts}/init.sh" "${inits[@]}"
+    fi
+    port_flag=""
+    [[ "${port}" != 9297 ]] && port_flag=" --port ${port}"
+    echo
+    echo "Point this shell at the emulator with:"
+    echo "  eval \"\$(awsemu env${port_flag})\""
+    ;;
+  env)
+    if ! healthy || [[ ! -f "${state}/env" ]]; then
+      echo "awsemu: no emulator on port ${port}, run awsemu up" >&2
+      exit 1
+    fi
+    if [[ "${shell_kind}" == pwsh ]]; then
+      printf 'Remove-Item %s -ErrorAction SilentlyContinue\n' "$(printf 'Env:%s,' "${credential_vars[@]}" | sed 's/,$//')"
+      while IFS='=' read -r key value; do
+        printf "\$env:%s = '%s'\n" "${key}" "${value//\'/\'\'}"
+      done <"${state}/env"
+    else
+      echo "unset ${credential_vars[*]}"
+      while IFS='=' read -r key value; do
+        printf 'export %s=%q\n' "${key}" "${value}"
+      done <"${state}/env"
+    fi
+    ;;
+  status)
+    if ! healthy; then
+      echo "AWS Emulator is not running on port ${port}"
+      exit 1
+    fi
+    echo "AWS Emulator is running at https://127.0.0.1:${port} ($(aws-emulator -v | sed -n 's/^Version: //p'))"
+    if command -v aws >/dev/null 2>&1 && [[ -f "${state}/env" ]]; then
+      echo "Account: $(with_env aws sts get-caller-identity --query Account --output text)"
+    fi
+    ;;
+  logs)
+    if [[ "${follow}" == 1 ]]; then tail -n 100 -f "${state}/emulator.log"; else tail -n 100 "${state}/emulator.log"; fi
+    ;;
+  down)
+    if [[ -f "${state}/pid" ]]; then
+      pid="$(cat "${state}/pid")"
+      if kill "${pid}" 2>/dev/null; then
+        for _ in $(seq 1 30); do kill -0 "${pid}" 2>/dev/null || break; sleep 0.5; done
+      fi
+    fi
+    rm -rf "${state}"
+    echo "AWS Emulator on port ${port} is stopped"
+    ;;
+  "" | -h | --help | help) usage ;;
+  *) echo "awsemu: unknown command ${command}" >&2; usage >&2; exit 2 ;;
+esac

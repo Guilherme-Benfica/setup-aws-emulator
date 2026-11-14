@@ -8,7 +8,9 @@ Run your AWS tests and Terraform in GitHub Actions against [AWS Emulator](https:
 - uses: Guilherme-Benfica/setup-aws-emulator@v1
 ```
 
-That step installs the emulator, starts it, waits until it is healthy, and points every later step at it: the AWS CLI, every AWS SDK, and Terraform.
+That step installs the emulator, starts it, waits until it is healthy, and points every later step at it: the AWS CLI, the AWS SDKs for Python, Go, JavaScript, .NET and Java, and Terraform. It can also create your test resources first (`init`).
+
+The same scripts run on your own machine as the [`awsemu`](#use-it-on-your-machine) command.
 
 ## Quick start
 
@@ -47,6 +49,67 @@ A full example that creates an S3 bucket, an object and a DynamoDB table lives i
 > }
 > ```
 
+## Create resources before the tests (`init`)
+
+List `.sh` scripts and Terraform directories, one per line. They run in order, after the emulator is up and the variables are set:
+
+```yaml
+      - uses: hashicorp/setup-terraform@v3   # only needed for Terraform directories
+      - uses: Guilherme-Benfica/setup-aws-emulator@v1
+        with:
+          init: |
+            scripts/create-queues.sh
+            infra/
+```
+
+If a step fails, the action fails and prints the emulator log.
+
+## SDKs
+
+| SDK | What the action sets up |
+| --- | --- |
+| AWS CLI, Python (boto3), Go | Nothing extra: they read `AWS_CA_BUNDLE` and the emulator config |
+| JavaScript v3 (Node.js) | `NODE_EXTRA_CA_CERTS` (added to Node's own roots) |
+| .NET and Rust on Linux | `SSL_CERT_FILE`: the system CA certificates **plus** the emulator CA, so `npm`, `dotnet restore` and `curl` keep working |
+| Java 2.x | A trust store with the JDK roots plus the emulator CA, in `AWS_EMULATOR_JAVA_OPTS` |
+
+Pass `AWS_EMULATOR_JAVA_OPTS` to the JVM that runs your tests:
+
+```yaml
+      - run: mvn -B test "-DargLine=$AWS_EMULATOR_JAVA_OPTS"           # Maven Surefire
+      - run: ./gradlew test                                            # Gradle: test { jvmArgs(System.getenv("AWS_EMULATOR_JAVA_OPTS").split(" ")) }
+```
+
+Or set `java-tool-options: true` and every JVM in the job trusts the emulator (the trust store keeps the JDK roots, so Maven and Gradle downloads still work).
+
+**.NET on Windows** ignores `SSL_CERT_FILE` and trusts only the Windows certificate store. Rather than adding the emulator CA to the machine, give the client an `HttpClientFactory` that trusts it ([full file](tests/sdk/dotnet/Program.cs)):
+
+```csharp
+var config = new AmazonSecurityTokenServiceConfig();
+if (OperatingSystem.IsWindows())
+    config.HttpClientFactory = new EmulatorHttpClientFactory(Environment.GetEnvironmentVariable("AWS_CA_BUNDLE")!);
+
+sealed class EmulatorHttpClientFactory(string caBundlePath) : HttpClientFactory
+{
+    private readonly X509Certificate2 _emulatorCa = X509Certificate2.CreateFromPem(File.ReadAllText(caBundlePath));
+
+    public override HttpClient CreateHttpClient(IClientConfig clientConfig) => new(new HttpClientHandler
+    {
+        ServerCertificateCustomValidationCallback = (_, certificate, chain, errors) =>
+        {
+            if (errors == SslPolicyErrors.None) return true;
+            if (errors != SslPolicyErrors.RemoteCertificateChainErrors || certificate is null || chain is null) return false;
+            chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+            chain.ChainPolicy.CustomTrustStore.Add(_emulatorCa);
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            return chain.Build(certificate);
+        },
+    });
+}
+```
+
+Each of these is tested in CI on Linux and on Windows (Java on Linux).
+
 ## Windows
 
 The same step works on `windows-2022` and `windows-2025`:
@@ -61,6 +124,101 @@ The same step works on `windows-2022` and `windows-2025`:
 
 AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows runners only runs Windows containers. So on Windows the action installs Ubuntu in WSL 1 with [`Vampire/setup-wsl`](https://github.com/Vampire/setup-wsl) and runs the emulator there. WSL 1 shares the network with Windows, so the emulator is at `https://127.0.0.1:9297` for every Windows program, and the action exports Windows paths (`C:\Users\...\.aws\emulator\9297\...`) in the same variables as on Linux. Setting up WSL adds about two minutes to the job.
 
+## Report at the end of the job
+
+```yaml
+      - uses: Guilherme-Benfica/setup-aws-emulator/report@v1
+        if: always()
+```
+
+It uploads the emulator log as an artifact and adds a section to the job summary. When a test fails with `NotImplemented` (HTTP 501, "scaffolded but not implemented in this emulator"), the operation is not in AWS Emulator yet: an emulator limitation, not a bug in your code. The emulator does not log each request, so the report cannot list those calls for you.
+
+## Apps in containers
+
+On Linux, a container started with `network_mode: host` reaches the emulator at `127.0.0.1`, so its certificate stays valid. Mount the emulator folder and pass the variables, as in [`examples/compose/compose.yml`](examples/compose/compose.yml):
+
+```yaml
+      - run: EMULATOR_DIR="$(dirname "$AWS_CA_BUNDLE")" docker compose -f examples/compose/compose.yml run --rm aws
+```
+
+## Use it on your machine
+
+`awsemu` runs the emulator locally with the same scripts, on Linux and on Windows (through WSL).
+
+**Windows (PowerShell)** — needs WSL with a Linux distribution (`wsl --install -d Ubuntu-24.04`):
+
+```powershell
+irm https://raw.githubusercontent.com/Guilherme-Benfica/setup-aws-emulator/v1/install.ps1 | iex
+# open a new terminal
+awsemu up
+awsemu env | Out-String | Invoke-Expression
+aws s3 mb s3://my-bucket
+awsemu down
+```
+
+**Linux (bash)**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Guilherme-Benfica/setup-aws-emulator/v1/install.sh | bash
+awsemu up
+eval "$(awsemu env)"
+aws s3 mb s3://my-bucket
+awsemu down
+```
+
+Prefer to read the installer first? Download [`install.sh`](install.sh) or [`install.ps1`](install.ps1), read it, then run it. It only copies files to `~/.awsemu/app` and adds `awsemu` to your user PATH; nothing needs admin.
+
+| Command | What it does |
+| --- | --- |
+| `awsemu up [--port N] [--region R] [--init PATH]... [--telemetry on]` | Installs the emulator if needed, starts it, runs init steps (`.sh` or Terraform on Linux, `.ps1` or Terraform on Windows) |
+| `awsemu env [--port N] [--shell bash\|pwsh]` | Prints the variables, and removes real AWS credentials from that shell |
+| `awsemu status`, `awsemu logs [-f]`, `awsemu down` | Health and account, the log, stop and clean up |
+
+In Git Bash on Windows, `awsemu` hands off to the Windows version; use `eval "$(awsemu env)"` there. Telemetry is off unless you pass `--telemetry on`. On Windows the emulator writes its files under `%USERPROFILE%\.aws\emulator\<port>`, so Windows programs read the same config and certificate.
+
+## Other CI systems
+
+`awsemu` works in any Linux job. These examples are **untested**; issues and fixes are welcome.
+
+```yaml
+# GitLab CI
+test:
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update && apt-get install -y curl ca-certificates awscli
+    - curl -fsSL https://raw.githubusercontent.com/Guilherme-Benfica/setup-aws-emulator/v1/install.sh | bash
+    - export PATH="$HOME/.local/bin:$PATH"
+    - awsemu up
+    - eval "$(awsemu env)"
+  script:
+    - pytest -q tests
+```
+
+```yaml
+# Azure Pipelines
+pool:
+  vmImage: ubuntu-24.04
+steps:
+  - bash: |
+      curl -fsSL https://raw.githubusercontent.com/Guilherme-Benfica/setup-aws-emulator/v1/install.sh | bash
+      export PATH="$HOME/.local/bin:$PATH"
+      awsemu up
+      eval "$(awsemu env)"
+      pytest -q tests
+```
+
+```groovy
+// Jenkins (Linux agent)
+sh '''
+  curl -fsSL https://raw.githubusercontent.com/Guilherme-Benfica/setup-aws-emulator/v1/install.sh | bash
+  export PATH="$HOME/.local/bin:$PATH"
+  awsemu up
+  eval "$(awsemu env)"
+  pytest -q tests
+  awsemu down
+'''
+```
+
 ## Inputs
 
 | Input | Default | Description |
@@ -69,6 +227,8 @@ AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows ru
 | `port` | `9297` | Port the emulator listens on, bound to 127.0.0.1 only. |
 | `region` | `us-east-1` | Exported to `AWS_REGION` and `AWS_DEFAULT_REGION`. |
 | `telemetry` | `off` | Emulator telemetry, `on` or `off`. |
+| `init` | | `.sh` scripts and Terraform directories to run after start, one per line. |
+| `java-tool-options` | `false` | Also export `JAVA_TOOL_OPTIONS` with the emulator trust store. |
 | `wait-timeout` | `60` | Seconds to wait for the health check before failing. |
 
 ## Outputs
@@ -79,6 +239,8 @@ AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows ru
 | `endpoint` | `https://127.0.0.1:9297` |
 | `ca-bundle` | Path to the emulator's `ca.pem` |
 | `account-id` | `000000000000` |
+| `ca-bundle-combined` | System CAs plus the emulator CA (Linux), also in `SSL_CERT_FILE` |
+| `java-truststore` | PKCS12 trust store with the JDK roots plus the emulator CA (password `changeit`) |
 | `log-file` | Path to the emulator log, handy in an `if: failure()` step |
 
 ## What the action exports
@@ -92,6 +254,10 @@ AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows ru
 | `AWS_EC2_METADATA_DISABLED` | `true` |
 | `AWS_DISABLE_HOST_PREFIX_INJECTION` | `true` |
 | `AWS_REGION`, `AWS_DEFAULT_REGION` | the `region` input |
+| `NODE_EXTRA_CA_CERTS` | the emulator `ca.pem` |
+| `SSL_CERT_FILE` | system CAs plus the emulator CA (Linux only) |
+| `AWS_EMULATOR_JAVA_OPTS` | trust store options for your test JVM (when `keytool` is available) |
+| `JAVA_TOOL_OPTIONS` | the same, only with `java-tool-options: true` |
 
 Before handing over, the action calls `sts get-caller-identity` and fails unless the answer is the emulator account `000000000000`, so a misconfigured job never silently reaches a real account.
 
@@ -99,6 +265,7 @@ Before handing over, the action calls `sts get-caller-identity` and fails unless
 
 - **Runs on Linux (x64, arm64) and Windows (x64) runners.** macOS runners aren't supported, because GitHub-hosted macOS runners have no Docker. On a self-hosted macOS runner, use the [Docker setup](https://docs.aws.amazon.com/emulator/latest/userguide/getting-started-docker.html).
 - **Do not combine it with real credentials in the same job.** If `AWS_ACCESS_KEY_ID` or `AWS_PROFILE` is set, the action warns you, because those win over the emulator's credentials file.
+- **Use a recent AWS SDK.** The action points SDKs at the emulator through `AWS_ENDPOINT_URL`. An SDK too old to read it calls real AWS instead, where the emulator keys are rejected (`The security token included in the request is invalid`) and nothing is created. We saw this with the AWS SDK for Java 2.28.0; the CI here uses 2.55.0. The `account-id` check only covers the AWS CLI.
 - **IAM is not enforced.** AWS Emulator does not evaluate IAM policies the way AWS does, so test permissions on real AWS.
 - **State is in memory** and disappears with the runner, so every job starts clean.
 - Fidelity varies by service and operation, and unsupported operations return HTTP 501. See the [AWS Emulator User Guide](https://docs.aws.amazon.com/emulator/latest/userguide/what-is-service.html).

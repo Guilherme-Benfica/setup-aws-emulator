@@ -1,0 +1,32 @@
+name: AWS Emulator report
+description: Adds an AWS Emulator section to the job summary and uploads the emulator log. Use it at the end of a job with if always().
+author: Guilherme Benfica
+
+inputs:
+  port:
+    description: Port the emulator was started on.
+    required: false
+    default: "9297"
+
+outputs:
+  log-file:
+    description: Path to the emulator log.
+    value: ${{ steps.report.outputs.log-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Write the AWS Emulator report
+      id: report
+      shell: bash
+      env:
+        PORT: ${{ inputs.port }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/report.sh" "$PORT"
+
+    - name: Upload the emulator log
+      if: steps.report.outputs.log-file != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.report.outputs.artifact-name }}
+        path: ${{ steps.report.outputs.log-file }}
+        if-no-files-found: ignore

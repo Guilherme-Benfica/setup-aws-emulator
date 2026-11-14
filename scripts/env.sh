@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Exports the variables that point the AWS CLI, SDKs and Terraform at the emulator
-# for every later step of the job.
+# Prints, one KEY=VALUE per line, the variables that point the AWS CLI, SDKs and
+# Terraform at the emulator. The action appends them to $GITHUB_ENV; awsemu turns them
+# into export lines.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib.sh
@@ -19,5 +20,5 @@ emulator_dir="$(emulator_home)/.aws/emulator/${port}"
   echo "AWS_DISABLE_HOST_PREFIX_INJECTION=true"
   echo "AWS_REGION=${region}"
   echo "AWS_DEFAULT_REGION=${region}"
-} >>"${GITHUB_ENV}"
+}
 
