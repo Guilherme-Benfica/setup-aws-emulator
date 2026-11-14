@@ -40,6 +40,12 @@ resource "aws_dynamodb_table" "notes" {
     name = "id"
     type = "S"
   }
+
+  # AWS Emulator reports on-demand throughput as -1 / -1, which the provider
+  # would show as a change on every plan.
+  lifecycle {
+    ignore_changes = [on_demand_throughput]
+  }
 }
 
 output "bucket_name" {
