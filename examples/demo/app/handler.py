@@ -1,8 +1,7 @@
-"""A Lambda-style handler: reads Kinesis records and writes a summary to S3.
+"""Lambda for the Kinesis trigger: reads Kinesis records and writes a summary to S3.
 
-It is tested by calling handler() directly against AWS Emulator. The emulator does not
-yet run a Lambda from a Kinesis trigger reliably, so the trigger itself is not part of
-the demo.
+AWS Emulator runs it from the event source mapping in infra/main.tf. The tests also call
+handler() directly with a hand-made event, which is the fastest way to check the logic.
 """
 import base64
 import json

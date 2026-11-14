@@ -124,6 +124,15 @@ The same step works on `windows-2022` and `windows-2025`:
 
 AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows runners only runs Windows containers. So on Windows the action installs Ubuntu in WSL 1 with [`Vampire/setup-wsl`](https://github.com/Vampire/setup-wsl) and runs the emulator there. WSL 1 shares the network with Windows, so the emulator is at `https://127.0.0.1:9297` for every Windows program, and the action exports Windows paths (`C:\Users\...\.aws\emulator\9297\...`) in the same variables as on Linux. Setting up WSL adds about two minutes to the job.
 
+## Lambda triggers
+
+AWS Emulator runs Lambda functions and their triggers. The [demo](examples/demo) covers Kinesis → Lambda → S3 and API Gateway → Lambda, created with Terraform and checked by pytest in CI. What we learned building it:
+
+- **The function role must be able to read the stream** (`kinesis:GetRecords`, `GetShardIterator`, `DescribeStream`, `DescribeStreamSummary`, `ListShards`, `ListStreams`). Like AWS, the emulator refuses the event source mapping otherwise, even though it does not evaluate IAM policies elsewhere.
+- **REST API stages answer at `https://127.0.0.1:<port>/<stage>/<path>`**, for example `https://127.0.0.1:9297/dev/summaries`. The proxy event has the v1 structure.
+- **Each Kinesis record arrives in its own invocation**: the emulator does not batch. Test batching, batching windows, tumbling windows and event filters on AWS. The official fidelity report shows those details fail today, while the basic trigger works.
+- **Functions run isolated**: they cannot open files on your machine.
+
 ## Report at the end of the job
 
 ```yaml
