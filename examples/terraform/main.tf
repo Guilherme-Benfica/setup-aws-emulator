@@ -3,8 +3,10 @@ terraform {
 
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
+      source = "hashicorp/aws"
+      # 6.23.0 and later read S3 bucket tags through S3 Control, whose requests
+      # go to <account-id>.127.0.0.1 and can't reach AWS Emulator.
+      version = ">= 5.0, < 6.23.0"
     }
   }
 }
