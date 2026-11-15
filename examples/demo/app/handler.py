@@ -1,20 +1,36 @@
-"""Lambda for the Kinesis trigger: reads Kinesis records and writes a summary to S3.
+"""Lambda for the Kinesis trigger: summarizes a batch of orders into S3.
 
-AWS Emulator runs it from the event source mapping in infra/main.tf. The tests also call
-handler() directly with a hand-made event, which is the fastest way to check the logic.
+Invalid records are reported back (ReportBatchItemFailures), so only those are retried
+and, if they keep failing, sent to the dead-letter queue. The valid ones are not lost.
 """
-import base64
 import json
+import logging
 import os
 
 import boto3
 
+from orders import InvalidOrder, parse_record, summarize
+
+logger = logging.getLogger()
+logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+s3 = boto3.client("s3")
+BUCKET = os.environ.get("DEMO_BUCKET", "demo-events")
+
 
 def handler(event, context):
-    orders = [json.loads(base64.b64decode(r["kinesis"]["data"])) for r in event["Records"]]
-    summary = {"orders": len(orders), "total": round(sum(o["amount"] for o in orders), 2)}
-    key = f"summaries/{event['Records'][0]['kinesis']['sequenceNumber']}.json"
-    boto3.client("s3").put_object(
-        Bucket=os.environ.get("DEMO_BUCKET", "demo-events"), Key=key, Body=json.dumps(summary)
-    )
-    return {"key": key, **summary}
+    orders, failures = [], []
+    for record in event["Records"]:
+        sequence = record["kinesis"]["sequenceNumber"]
+        try:
+            orders.append(parse_record(record))
+        except InvalidOrder as error:
+            logger.warning("invalid order", extra={"sequence": sequence, "error": str(error)})
+            failures.append({"itemIdentifier": sequence})
+
+    if orders:
+        key = f"summaries/{event['Records'][0]['kinesis']['sequenceNumber']}.json"
+        summary = summarize(orders)
+        s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(summary), ContentType="application/json")
+        logger.info("summary written", extra={"key": key, **summary})
+
+    return {"batchItemFailures": failures}

@@ -126,12 +126,16 @@ AWS Emulator runs natively only on Linux, and Docker on GitHub-hosted Windows ru
 
 ## Lambda triggers
 
-AWS Emulator runs Lambda functions and their triggers. The [demo](examples/demo) covers Kinesis → Lambda → S3 and API Gateway → Lambda, created with Terraform and checked by pytest in CI. What we learned building it:
+AWS Emulator runs Lambda functions and their triggers. The [demo](examples/demo) covers Kinesis → Firehose → S3, Kinesis → Lambda → S3 and API Gateway → Lambda, created with Terraform following the AWS Well-Architected pillars (private encrypted bucket, encrypted stream, least-privilege roles, dead-letter queue with partial batch failures, log groups with retention, API key with throttling) and checked by unit and integration tests in CI. What we learned building it:
 
 - **The function role must be able to read the stream** (`kinesis:GetRecords`, `GetShardIterator`, `DescribeStream`, `DescribeStreamSummary`, `ListShards`, `ListStreams`). Like AWS, the emulator refuses the event source mapping otherwise, even though it does not evaluate IAM policies elsewhere.
 - **REST API stages answer at `https://127.0.0.1:<port>/<stage>/<path>`**, for example `https://127.0.0.1:9297/dev/summaries`. The proxy event has the v1 structure.
 - **Each Kinesis record arrives in its own invocation**: the emulator does not batch. Test batching, batching windows, tumbling windows and event filters on AWS. The official fidelity report shows those details fail today, while the basic trigger works.
 - **Functions run isolated**: they cannot open files on your machine.
+- **Failed records reach the dead-letter queue**: with `ReportBatchItemFailures`, retries and an `on_failure` destination, an invalid record lands in SQS after the retries (`RetryAttemptsExhausted`), as on AWS.
+- **`log_format = "JSON"` is ignored**: logs reach CloudWatch as plain text. Check structured logging on AWS.
+- **API keys need an explicit value**: AWS generates one when you omit it; the emulator asks for 20+ characters, so generate it (for example with `random_password`). The emulator does enforce the key: calls without it get 403.
+- **A versioned bucket with objects cannot be deleted**, as on AWS: the demo sets `force_destroy` outside production so `terraform destroy` works.
 
 ## Report at the end of the job
 

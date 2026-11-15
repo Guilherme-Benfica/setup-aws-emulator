@@ -346,5 +346,5 @@ jobs:
       - name: Run the demo tests
         working-directory: examples/demo
         run: |
-          pip install boto3 pytest
-          python -m pytest -q
+          pip install -r requirements.txt
+          python -m pytest
